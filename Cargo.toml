@@ -7,3 +7,4 @@ repository = "https://github.com/ABYSSudo/congularity.git"
 license = "GPL-3.0-or-later"
 [dependencies]
 gtk = { version = "0.10.3", package = "gtk4", features = ["v4_20"] }
+libc = "0.2"
