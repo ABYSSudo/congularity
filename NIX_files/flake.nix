@@ -38,21 +38,22 @@
       packages.${system} = {
         iso = mkIso;
         vm  = mkVm;
-        
+
         congularity = pkgs.rustPlatform.buildRustPackage {
           pname = "congularity";
           version = "0.1.0";
           src = ./.;
           cargoLock.lockFile = ./Cargo.lock;
           nativeBuildInputs = [ pkgs.pkg-config ];
-          
-          buildInputs = [ 
-            pkgs.gtk4 
-            pkgs.gdk-pixbuf 
+
+          buildInputs = [
+            pkgs.gtk4
+            pkgs.gdk-pixbuf
           ];
         default = self.packages.${system}.congularity;
       };
 
       nixosConfigurations.my-nixos = mkSystem;
     };
+  };
 }

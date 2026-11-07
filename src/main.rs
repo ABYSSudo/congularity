@@ -15,17 +15,44 @@ use std::{
 
 const APP_ID: &str = "org.gtk_rs.Congularity";
 
-fn ensure_git_tracked(pt: &std::path::Path) {
+fn common_nix(pt: &String, ssh: bool, deskman: u32) -> std::io::Result<()> {
+    let mut conf2 = read_to_string("NIX_files/common.nix")?;
+
+    conf2 = if ssh {
+        conf2.replace(" enable = false", " enable = true")
+    } else {
+        conf2
+    };
+    if deskman != 0 {
+        conf2.push_str("  services.xserver.enable = true;\n  ");
+        if deskman == 1 {
+            conf2.push_str("services.xserver.displayManager.gdm.enable = true;\n  services.xserver.desktopManager.gnome.enable = true;");
+        } else if deskman == 2 {
+            conf2.push_str("services.displayManager.sddm.enable = true;\n  services.desktopManager.plasma6.enable = true;");
+        } else if deskman == 3 {
+            conf2.push_str("services.xserver.displayManager.lightdm.enable = true;\n  services.xserver.desktopManager.xfce.enable = true;");
+        }
+    }
+    conf2.push_str("\n}");
+    let pt1 = pt.to_owned() + "common.nix";
+    write(pt1, conf2)?;
+
+    Ok(())
+}
+
+fn ensure_git_tracked(put: &std::path::Path) {
+    let mut pt = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    pt.push(put);
     if !pt.join(".git").exists() {
         let _ = std::process::Command::new("git")
             .args(["init"])
-            .current_dir(pt)
+            .current_dir(&pt)
             .status();
     }
-
+    dbg!(1);
     let _ = std::process::Command::new("git")
         .args(["add", "."])
-        .current_dir(pt)
+        .current_dir(&pt)
         .status();
 }
 
@@ -50,7 +77,6 @@ fn add_nix(pt: &String) -> std::io::Result<()> {
         "NIX_files/flake.nix",
         "NIX_files/users.nix",
         "NIX_files/kernel.nix",
-        "NIX_files/common.nix",
     ] {
         let vp: String = p
             .split_once('/')
@@ -83,13 +109,11 @@ fn nix_build(
     Arc<Mutex<Option<Result<(), String>>>>,
 )> {
     let slot: Arc<Mutex<Option<Child>>> = Arc::new(Mutex::new(None));
-    // Меняем на Arc<Mutex>
+
     let build_status: Arc<Mutex<Option<Result<(), String>>>> = Arc::new(Mutex::new(None));
 
     let mut put = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     put.push(pt);
-
-    let _ = Command::new("ls");
 
     ensure_git_tracked(&put);
 
@@ -102,7 +126,7 @@ fn nix_build(
     //         .stdout(Stdio::inherit())
     //         .stderr(Stdio::inherit()),
     //     _ => nix
-    //         .args(["nix", "build", ".#iso", "-L", "-o", "result"])
+    //         .args(["nix", "build", ".#vm", "-L", "-o", "result"])
     //         .process_group(0)
     //         .current_dir(&put)
     //         .stdout(Stdio::inherit())
@@ -266,8 +290,9 @@ fn build_ui(app: &Application) {
         "Files only (flake & config)",
         "ISO",
         "Kernel Virtual Machine",
-        "Bootable device",
     ]);
+
+    let desktop_manager = StringList::new(&["None", "GNOME", "KDE Plasma 6", "XFCE"]);
 
     let drop_preset = DropDown::builder()
         .model(&presets)
@@ -278,6 +303,14 @@ fn build_ui(app: &Application) {
 
     let drop_kernel = DropDown::builder()
         .model(&kernels)
+        .selected(0)
+        .margin_start(0)
+        .margin_end(0)
+        .hexpand(true)
+        .build();
+
+    let drop_deskman = DropDown::builder()
+        .model(&desktop_manager)
         .selected(0)
         .margin_start(0)
         .margin_end(0)
@@ -328,6 +361,13 @@ fn build_ui(app: &Application) {
         scrollbox.append(&butt);
     }
 
+    let ssh = CheckButton::builder()
+        .label("Enable SSH")
+        .active(false)
+        .margin_top(10)
+        .halign(Align::Center)
+        .build();
+
     let res_path = Entry::builder()
         .placeholder_text(
             "Please, enter path for result manually,\nstarting from projetct's directory",
@@ -339,8 +379,10 @@ fn build_ui(app: &Application) {
     {
         vbox.append(&drop_preset);
         vbox.append(&drop_kernel);
+        vbox.append(&drop_deskman);
         vbox.append(&drop_result);
         vbox.append(&scrollable);
+        vbox.append(&ssh);
         vbox.append(&res_path);
         vbox.append(&button_build);
     }
@@ -359,6 +401,8 @@ fn build_ui(app: &Application) {
 
     button_build.connect_clicked(move |_button_build| {
         let res = drop_result.selected();
+        let deskman = drop_deskman.selected();
+        let ssh_chk = ssh.is_active();
         let pt = if res_path.text().is_empty() {
             "RESULT/".to_string()
         } else {
@@ -366,6 +410,7 @@ fn build_ui(app: &Application) {
         };
         if sel == 0 {
             let _ = custom_nix(&checks, &pt);
+            let _ = common_nix(&pt, ssh_chk, deskman);
         }
         let _ = add_nix(&pt);
         if (res == 2) || (res == 1) {
