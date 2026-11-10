@@ -1,10 +1,11 @@
 use gtk::{
     Align, Application, ApplicationWindow, Box, Button, CheckButton, DropDown, Entry, Image, Label,
-    PolicyType, ScrolledWindow, StringList, glib, prelude::*,
+    PolicyType, Revealer, RevealerTransitionType, ScrolledWindow, StringList, glib, prelude::*,
 };
+use pwhash::sha512_crypt;
 use std::{
     self,
-    cell::Cell,
+    cell::{Cell, RefCell},
     fs::{read_to_string, write},
     os::unix::process::CommandExt,
     path::PathBuf,
@@ -14,6 +15,19 @@ use std::{
 };
 
 const APP_ID: &str = "org.gtk_rs.Congularity";
+
+fn user_notification(reveal: &Revealer, note: &Label, user_box: &Box, text: &str) {
+    note.set_text(text);
+    reveal.set_reveal_child(true);
+    let reveal_clone = reveal.clone();
+    user_box.set_sensitive(false);
+    let box_clone = user_box.clone();
+    glib::timeout_add_local(std::time::Duration::from_secs(2), move || {
+        reveal_clone.set_reveal_child(false);
+        box_clone.set_sensitive(true);
+        glib::ControlFlow::Break
+    });
+}
 
 fn common_nix(pt: &String, ssh: bool, deskman: u32) -> std::io::Result<()> {
     let mut conf2 = read_to_string("NIX_files/common.nix")?;
@@ -40,6 +54,22 @@ fn common_nix(pt: &String, ssh: bool, deskman: u32) -> std::io::Result<()> {
     Ok(())
 }
 
+fn kernel_nix(pt: &String, kern: u32) -> std::io::Result<()> {
+    let mut conf = read_to_string("NIX_files/kernel.nix")?;
+    let pt1 = pt.to_owned() + "kernel.nix";
+    let new_ker = String::from(match kern {
+        0 => "linuxPackages",
+        1 => "linuxPackages_latest",
+        2 => "linuxPackages_6_6",
+        _ => "linuxPackages",
+    });
+    conf.push_str(&new_ker);
+    conf.push_str(";\n}");
+    // dbg!(&pt1);
+    write(pt1, &conf)?;
+    Ok(())
+}
+
 fn ensure_git_tracked(put: &std::path::Path) {
     let mut pt = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     pt.push(put);
@@ -49,7 +79,6 @@ fn ensure_git_tracked(put: &std::path::Path) {
             .current_dir(&pt)
             .status();
     }
-    dbg!(1);
     let _ = std::process::Command::new("git")
         .args(["add", "."])
         .current_dir(&pt)
@@ -73,11 +102,7 @@ fn custom_nix(sets: &Vec<(CheckButton, String)>, pt: &String) -> std::io::Result
 }
 
 fn add_nix(pt: &String) -> std::io::Result<()> {
-    for p in [
-        "NIX_files/flake.nix",
-        "NIX_files/users.nix",
-        "NIX_files/kernel.nix",
-    ] {
+    for p in ["NIX_files/flake.nix", "NIX_files/users.nix"] {
         let vp: String = p
             .split_once('/')
             .map(|(_, after)| after.to_string())
@@ -168,6 +193,174 @@ fn nix_build(
     });
 
     Ok((slot, build_status))
+}
+
+fn add_user(app: &Application, parent: &ApplicationWindow, users: Rc<RefCell<String>>) {
+    let user_box = Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(20)
+        .hexpand(true)
+        .valign(Align::Center)
+        .halign(Align::Center)
+        .build();
+
+    let user_window = ApplicationWindow::builder()
+        .application(app)
+        .child(&user_box)
+        .modal(true)
+        .transient_for(parent)
+        .default_height(500)
+        .default_width(500)
+        .hexpand(true)
+        .title("Adding users")
+        .build();
+
+    let user = Entry::builder().placeholder_text("Enter username").build();
+    let pass = Entry::builder()
+        .placeholder_text("Enter password")
+        .visibility(false)
+        .build();
+    let hide_pass = CheckButton::builder()
+        .label("Hide password")
+        .active(true)
+        .build();
+    let sudo = CheckButton::builder()
+        .label("Enable sudo")
+        .active(false)
+        .build();
+    let wifi = CheckButton::builder()
+        .label("Allow Wi-Fi")
+        .active(false)
+        .build();
+    let gpu = CheckButton::builder()
+        .label("Allow GPU & Audio access")
+        .active(false)
+        .build();
+    let add = Button::builder().label("Add").build();
+    let reset = Button::builder().label("Reset all users").build();
+    reset.add_css_class("destructive-action");
+    let notify = Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .halign(Align::Center)
+        .valign(Align::End)
+        .margin_bottom(20)
+        .build();
+    notify.add_css_class("toast");
+    let note = Label::builder().build();
+    note.add_css_class("toast_label");
+    notify.append(&note);
+    let reveal = Revealer::builder()
+        .transition_type(RevealerTransitionType::SlideUp)
+        .transition_duration(300)
+        .child(&notify)
+        .reveal_child(false)
+        .build();
+
+    {
+        user_box.append(&user);
+        user_box.append(&pass);
+        user_box.append(&hide_pass);
+        user_box.append(&sudo);
+        user_box.append(&wifi);
+        user_box.append(&gpu);
+        user_box.append(&add);
+        user_box.append(&reset);
+        user_box.append(&reveal);
+    }
+
+    let pas = pass.clone();
+
+    hide_pass.connect_toggled(move |hp| {
+        if hp.is_active() {
+            pas.set_visibility(false);
+        } else {
+            pas.set_visibility(true);
+        }
+    });
+
+    let amogus = users.clone();
+    let pas = pass.clone();
+    let reveal_clone = reveal.clone();
+    let note_clone = note.clone();
+    let box_clone = user_box.clone();
+
+    add.connect_clicked(move |_| {
+        if user.text().is_empty() {
+            user_notification(
+                &reveal_clone,
+                &note_clone,
+                &box_clone,
+                "Error! Username is empty.",
+            );
+            return;
+        } else if pas.text().is_empty() {
+            user_notification(
+                &reveal_clone,
+                &note_clone,
+                &box_clone,
+                "Error! Password is empty.",
+            );
+            return;
+        }
+
+        let mut temp = amogus.borrow_mut();
+        let mut opt = String::new();
+        for i in [
+            ("\"wheel\" ", sudo.is_active()),
+            ("\"networkmanager\" ", wifi.is_active()),
+            ("\"video, audio\" ", gpu.is_active()),
+        ] {
+            if i.1 {
+                opt.push_str(i.0);
+            }
+        }
+
+        let mut res = String::from("users.users.");
+        res.push_str(&user.text().to_string());
+        res.push_str(" = {\n    isNormalUser = true;\n    hashedPassword = \"");
+        match sha512_crypt::hash(&pas.text().to_string()) {
+            Ok(hash) => {
+                res.push_str(&hash);
+            }
+            Err(e) => {
+                user_notification(&reveal_clone, &note_clone, &box_clone, &e.to_string());
+                return;
+            }
+        }
+        res.push_str("\";\n  ");
+        if !opt.is_empty() {
+            res.push_str("extraGroups = [ ");
+            res.push_str(&opt);
+            res.push_str("];");
+        }
+        res.push_str("\n  };\n");
+        // println!("{}", &res);
+
+        temp.push_str(&res);
+        user_notification(
+            &reveal_clone,
+            &note_clone,
+            &box_clone,
+            "User was added into list.",
+        );
+    });
+
+    let amogus = users.clone();
+    let reveal_clone = reveal.clone();
+    let note_clone = note.clone();
+    let box_clone = user_box.clone();
+    reset.connect_clicked(move |_| {
+        let mut temp = amogus.borrow_mut();
+        user_notification(
+            &reveal_clone,
+            &note_clone,
+            &box_clone,
+            "Users was removed from list",
+        );
+        temp.clear();
+    });
+
+    user_window.present();
 }
 
 fn building_proccess(
@@ -268,7 +461,7 @@ fn build_ui(app: &Application) {
         .margin_bottom(12)
         .spacing(12)
         .valign(Align::Fill)
-        .halign(Align::Center)
+        // .halign(Align::Center)
         .build();
 
     let button_build = Button::builder()
@@ -277,12 +470,17 @@ fn build_ui(app: &Application) {
         .margin_end(50)
         .build();
 
+    let button_add_user = Button::builder()
+        .label("Add user")
+        .halign(Align::End)
+        .build();
+
     let presets = StringList::new(&["Custom", "Basic", "Office", "Gaming", "Server"]);
 
     let kernels = StringList::new(&[
-        "linux_latest",
-        "linux_6_6",
-        "linux_LTS_PLACEHOLDER",
+        "Latest LTS kernel",
+        "Latest Linux kernel",
+        "Linux-6.6 kernel",
         "linux_ZOV_PLACEHOLDER",
     ]);
 
@@ -296,33 +494,30 @@ fn build_ui(app: &Application) {
 
     let drop_preset = DropDown::builder()
         .model(&presets)
+        .halign(Align::Center)
         .selected(0)
-        .margin_start(0)
-        .margin_end(0)
+        .width_request(240)
         .build();
 
     let drop_kernel = DropDown::builder()
         .model(&kernels)
         .selected(0)
-        .margin_start(0)
-        .margin_end(0)
-        .hexpand(true)
+        .halign(Align::Center)
+        .width_request(240)
         .build();
 
     let drop_deskman = DropDown::builder()
         .model(&desktop_manager)
         .selected(0)
-        .margin_start(0)
-        .margin_end(0)
-        .hexpand(true)
+        .halign(Align::Center)
+        .width_request(240)
         .build();
 
     let drop_result = DropDown::builder()
         .model(&results)
         .selected(0)
-        .margin_start(0)
-        .margin_end(0)
-        .halign(Align::Fill)
+        .halign(Align::Center)
+        .width_request(240)
         .build();
 
     let scrollbox = Box::builder()
@@ -372,11 +567,13 @@ fn build_ui(app: &Application) {
         .placeholder_text(
             "Please, enter path for result manually,\nstarting from projetct's directory",
         )
-        .hexpand(true)
+        // .hexpand(true)
+        .halign(Align::Center)
         .width_chars(30)
         .build();
 
     {
+        vbox.append(&button_add_user);
         vbox.append(&drop_preset);
         vbox.append(&drop_kernel);
         vbox.append(&drop_deskman);
@@ -397,22 +594,44 @@ fn build_ui(app: &Application) {
 
     let app_clone = app.clone();
     let window_clone = window.clone();
+    let users = Rc::new(RefCell::new(String::new()));
+    let amogus = users.clone();
+
+    button_add_user.connect_clicked(move |_button_add_user| {
+        add_user(&app_clone, &window_clone, amogus.clone());
+    });
+
+    let app_clone = app.clone();
+    let window_clone = window.clone();
     let sel = drop_preset.selected();
+    let uss = users.clone();
 
     button_build.connect_clicked(move |_button_build| {
         let res = drop_result.selected();
         let deskman = drop_deskman.selected();
         let ssh_chk = ssh.is_active();
+        let kernel = drop_kernel.selected();
         let pt = if res_path.text().is_empty() {
             "RESULT/".to_string()
         } else {
             res_path.text().to_string()
         };
+
+        let _ = add_nix(&pt);
         if sel == 0 {
             let _ = custom_nix(&checks, &pt);
+            let _ = kernel_nix(&pt, kernel);
             let _ = common_nix(&pt, ssh_chk, deskman);
         }
-        let _ = add_nix(&pt);
+
+        if !uss.borrow().clone().is_empty() {
+            let mut meme = String::from("{ ... }: {");
+            meme.push_str(&uss.borrow().clone().to_string());
+            meme.push_str("}");
+            // dbg!(&meme);
+            let _ = write(pt.to_owned() + "users.nix", &meme);
+        }
+
         if (res == 2) || (res == 1) {
             let (slot, status) = match nix_build(res, &pt) {
                 Ok(result) => result,
